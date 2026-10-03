@@ -1,0 +1,244 @@
+# Tool Versions
+
+This file records the exact tool versions used for the project so that RTL, simulation, synthesis, STA, and physical-design results can be reproduced.
+
+
+
+## Development and Simulation Tools
+
+### Verilator
+
+Command:
+
+```bash
+verilator --version
+```
+
+Recorded version:
+
+```text
+Verilator: <paste exact output here>
+```
+
+### GTKWave
+
+Command:
+
+```bash
+gtkwave --version
+```
+
+Recorded version:
+
+```text
+GTKWave: <paste exact output here>
+```
+
+### GNU Make
+
+Command:
+
+```bash
+make --version
+```
+
+Recorded version:
+
+```text
+GNU Make: <paste first line of output here>
+```
+
+### GNU Compiler Collection
+
+Command:
+
+```bash
+g++ --version
+```
+
+Recorded version:
+
+```text
+g++: <paste first line of output here>
+```
+
+### Zlib Development Package
+
+Command:
+
+```bash
+dpkg -s zlib1g-dev | grep '^Version:'
+```
+
+Recorded version:
+
+```text
+zlib1g-dev: <paste exact Version line here>
+```
+
+---
+
+## RTL / EDA Flow Tools
+
+### Yosys
+
+Command:
+
+```bash
+yosys -V
+```
+
+Recorded version:
+
+```text
+Yosys: <paste exact output here>
+```
+
+### OpenROAD
+
+Command:
+
+```bash
+openroad -version
+```
+
+Recorded version:
+
+```text
+OpenROAD: <paste exact output here>
+```
+
+### OpenSTA
+
+Command:
+
+```bash
+sta -version
+```
+
+Recorded version:
+
+```text
+OpenSTA: <paste exact output here>
+```
+
+### KLayout
+
+Command:
+
+```bash
+klayout --version
+```
+
+Recorded version:
+
+```text
+KLayout: <paste exact output here>
+```
+
+### Magic
+
+Command:
+
+```bash
+magic -version
+```
+
+Recorded version:
+
+```text
+Magic: <paste exact output here>
+```
+
+---
+
+## Scripting / Operating Environment
+
+### Python
+
+Command:
+
+```bash
+python3 --version
+```
+
+Recorded version:
+
+```text
+Python: <paste exact output here>
+```
+
+### Tcl
+
+Command:
+
+```bash
+tclsh <<< 'puts [info patchlevel]'
+```
+
+Recorded version:
+
+```text
+Tcl: <paste exact output here>
+```
+
+### Git
+
+Command:
+
+```bash
+git --version
+```
+
+Recorded version:
+
+```text
+Git: <paste exact output here>
+```
+
+### Operating System
+
+Commands:
+
+```bash
+cat /etc/os-release
+uname -a
+```
+
+Recorded environment:
+
+```text
+OS:
+Kernel:
+Architecture:
+```
+
+---
+
+## Verification Notes
+
+The project uses the following intended toolchain roles:
+
+| Tool | Role |
+|---|---|
+| SystemVerilog | RTL design |
+| Verilator | RTL linting and simulation |
+| GTKWave | Waveform inspection |
+| Yosys | Logic synthesis and synthesis reporting |
+| OpenROAD | Floorplanning, placement, CTS, routing, and physical flow |
+| OpenSTA | Static timing analysis |
+| KLayout / Magic | Layout inspection and physical verification |
+| Python | Automation, report parsing, data collection, and plotting |
+| Tcl | Flow control and tool scripting |
+
+## Version Capture Date
+
+```text
+Date:
+```
+
+## Notes
+
+- Record versions from the actual environment used for the project.
+- Keep this file unchanged for a baseline run.
+- If a tool is upgraded later, record the change as a new experiment or environment revision rather than silently replacing the baseline version.
