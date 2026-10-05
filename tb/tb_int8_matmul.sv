@@ -6,6 +6,11 @@ module tb_int8_matmul;
     localparam int DATA_WIDTH  = 8;
     localparam int ACC_WIDTH   = 18;
 
+    localparam int NUM_RANDOM_TESTS = 20;
+
+    // Fixed seed for reproducibility.
+    localparam int unsigned RANDOM_SEED_INIT = 32'h5A17_2026;
+
     // ------------------------------------------------------------
     // Clock / reset
     // ------------------------------------------------------------
@@ -25,7 +30,7 @@ module tb_int8_matmul;
     // ------------------------------------------------------------
     logic                         busy;
     logic                         done;
-    logic signed [ACC_WIDTH-1:0] data_out;
+    logic signed [ACC_WIDTH-1:0]  data_out;
     logic                         out_valid;
 
     // ------------------------------------------------------------
@@ -34,16 +39,30 @@ module tb_int8_matmul;
     logic signed [7:0] a_values [0:7][0:7];
     logic signed [7:0] b_values [0:7][0:7];
 
-    // Software reference in row-major order
+    // ------------------------------------------------------------
+    // Software reference
+    // ------------------------------------------------------------
     integer expected_flat [0:63];
 
+    // ------------------------------------------------------------
+    // Loop / calculation variables
+    // ------------------------------------------------------------
     integer r;
     integer c;
     integer k;
     integer idx;
+    integer cycle;
 
     integer expected_value;
     integer actual_value;
+
+    integer random_test_num;
+
+    integer signed random_value_a;
+    integer signed random_value_b;
+
+    // Fixed reproducible random seed.
+    integer unsigned random_seed;
 
     // ------------------------------------------------------------
     // DUT
@@ -69,7 +88,7 @@ module tb_int8_matmul;
     );
 
     // ------------------------------------------------------------
-    // 10 ns clock period
+    // Clock: 10 ns period
     // ------------------------------------------------------------
     always #5 clk <= ~clk;
 
@@ -89,13 +108,344 @@ module tb_int8_matmul;
     endtask
 
     // ------------------------------------------------------------
-    // Main test
+    // Calculate independent software reference
+    //
+    // C[r][c] = sum(A[r][k] * B[k][c])
+    // ------------------------------------------------------------
+    task automatic calculate_reference;
+        begin
+            for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
+                for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
+
+                    expected_value = 0;
+
+                    for (k = 0; k < MATRIX_SIZE; k = k + 1) begin
+                        expected_value =
+                            expected_value
+                            + $signed(a_values[r][k])
+                            * $signed(b_values[k][c]);
+                    end
+
+                    expected_flat[r * MATRIX_SIZE + c]
+                        = expected_value;
+                end
+            end
+        end
+    endtask
+
+    // ------------------------------------------------------------
+    // Reset DUT
+    // ------------------------------------------------------------
+    task automatic reset_dut;
+        begin
+            @(negedge clk);
+
+            rst_n      = 1'b0;
+            data_valid = 1'b0;
+            matrix_sel = 1'b0;
+            start      = 1'b0;
+            data_in    = '0;
+
+            repeat (2) @(posedge clk);
+
+            #1;
+
+            check(busy == 1'b0,
+                  "busy should be 0 after reset");
+
+            check(done == 1'b0,
+                  "done should be 0 after reset");
+
+            check(out_valid == 1'b0,
+                  "out_valid should be 0 after reset");
+
+            @(negedge clk);
+
+            rst_n = 1'b1;
+        end
+    endtask
+
+    // ------------------------------------------------------------
+    // Load matrix A
+    // ------------------------------------------------------------
+    task automatic load_matrix_a;
+        begin
+            @(negedge clk);
+
+            data_valid = 1'b1;
+            matrix_sel = 1'b0;
+
+            for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
+                for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
+
+                    data_in = a_values[r][c];
+
+                    @(posedge clk);
+                    #1;
+
+                    check(busy == 1'b1,
+                          "busy should be high while loading A");
+                end
+            end
+
+            $display("PASS: loaded matrix A");
+        end
+    endtask
+
+    // ------------------------------------------------------------
+    // Load matrix B
+    // ------------------------------------------------------------
+    task automatic load_matrix_b;
+        begin
+            @(negedge clk);
+
+            matrix_sel = 1'b1;
+
+            for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
+                for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
+
+                    data_in = b_values[r][c];
+
+                    @(posedge clk);
+                    #1;
+
+                    check(busy == 1'b1,
+                          "busy should be high while loading B");
+                end
+            end
+
+            $display("PASS: loaded matrix B");
+        end
+    endtask
+
+    // ------------------------------------------------------------
+    // Start computation
+    // ------------------------------------------------------------
+    task automatic start_compute;
+        begin
+            @(negedge clk);
+
+            data_valid = 1'b0;
+            matrix_sel = 1'b0;
+            data_in    = '0;
+
+            @(posedge clk);
+            #1;
+
+            check(busy == 1'b1,
+                  "busy should be high in READY");
+
+            check(dut.u_controller.state == 3'd3,
+                  "controller should be in READY");
+
+            @(negedge clk);
+
+            start = 1'b1;
+
+            @(posedge clk);
+            #1;
+
+            check(busy == 1'b1,
+                  "busy should remain high after start");
+
+            check(dut.u_controller.state == 3'd4,
+                  "controller should enter COMPUTE");
+
+            check(dut.u_controller.k_count == 3'd0,
+                  "compute should begin with k=0");
+
+            start = 1'b0;
+
+            $display("PASS: computation started");
+        end
+    endtask
+
+    // ------------------------------------------------------------
+    // Wait for done with timeout
+    // ------------------------------------------------------------
+    task automatic wait_for_done;
+        bit saw_done;
+
+        begin
+            saw_done = 1'b0;
+
+            for (cycle = 0; cycle < 20; cycle = cycle + 1) begin
+
+                @(posedge clk);
+                #1;
+
+                if (done) begin
+                    saw_done = 1'b1;
+                    break;
+                end
+            end
+
+            check(saw_done,
+                  "timed out waiting for done");
+
+            check(out_valid == 1'b0,
+                  "out_valid should be low during done");
+
+            $display("PASS: computation complete");
+        end
+    endtask
+
+    // ------------------------------------------------------------
+    // Check all 64 outputs
+    // ------------------------------------------------------------
+    task automatic check_outputs;
+        begin
+            // Move from done cycle to first output cycle.
+            @(posedge clk);
+            #1;
+
+            check(done == 1'b0,
+                  "done should return low");
+
+            check(out_valid == 1'b1,
+                  "out_valid should assert after done");
+
+            check(dut.u_controller.out_count == 6'd0,
+                  "first output count should be 0");
+
+            for (idx = 0; idx < 64; idx = idx + 1) begin
+
+                check(out_valid == 1'b1,
+                      "out_valid should remain high");
+
+                check(
+                    dut.u_controller.out_count == 6'(idx),
+                    "output counter mismatch"
+                );
+
+                actual_value = int'($signed(data_out));
+                expected_value = expected_flat[idx];
+
+                if (actual_value != expected_value) begin
+
+                    $display(
+                        "ERROR: output[%0d] actual=%0d expected=%0d",
+                        idx,
+                        actual_value,
+                        expected_value
+                    );
+
+                    $fatal(1);
+                end
+
+                @(posedge clk);
+                #1;
+            end
+
+            check(out_valid == 1'b0,
+                  "out_valid should be low after final output");
+
+            check(busy == 1'b0,
+                  "busy should be low after final output");
+
+            $display("PASS: all 64 outputs");
+        end
+    endtask
+
+    // ------------------------------------------------------------
+    // Run one complete matrix test
+    // ------------------------------------------------------------
+    task automatic run_matrix_test(
+        input string test_name
+    );
+        begin
+            $display("");
+            $display("========================================");
+            $display("TEST: %s", test_name);
+            $display("========================================");
+
+            calculate_reference;
+            reset_dut;
+            load_matrix_a;
+            load_matrix_b;
+            start_compute;
+            wait_for_done;
+            check_outputs;
+
+            $display("PASS: %s", test_name);
+        end
+    endtask
+
+    // ------------------------------------------------------------
+    // Generate one random matrix pair
+    //
+    // Random values cover the complete signed INT8 range:
+    //     -128 ... +127
+    //
+    // $urandom(seed) updates seed, so the entire sequence is
+    // reproducible from RANDOM_SEED_INIT.
+    // ------------------------------------------------------------
+    task automatic generate_random_matrices;
+        begin
+
+            for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
+                for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
+
+                    // Generate unsigned 8-bit quantity 0...255.
+                    random_value_a =
+                        $urandom(random_seed) & 32'h0000_00FF;
+
+                    random_value_b =
+                        $urandom(random_seed) & 32'h0000_00FF;
+
+                    // Shift into signed INT8 range:
+                    // 0...255 -> -128...127
+                    random_value_a = random_value_a - 128;
+                    random_value_b = random_value_b - 128;
+
+                    a_values[r][c] = 8'(random_value_a);
+                    b_values[r][c] = 8'(random_value_b);
+
+                end
+            end
+        end
+    endtask
+
+    // ------------------------------------------------------------
+    // Print random test matrices
+    // Useful if a random test ever fails.
+    // ------------------------------------------------------------
+    task automatic print_test_matrices;
+        begin
+
+            $display("");
+            $display("Matrix A:");
+
+            for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
+                $write("  ");
+
+                for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
+                    $write("%5d ", a_values[r][c]);
+                end
+
+                $display("");
+            end
+
+            $display("");
+            $display("Matrix B:");
+
+            for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
+                $write("  ");
+
+                for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
+                    $write("%5d ", b_values[r][c]);
+                end
+
+                $display("");
+            end
+        end
+    endtask
+
+    // ------------------------------------------------------------
+    // Main test sequence
     // ------------------------------------------------------------
     initial begin
 
-        // --------------------------------------------------------
-        // Initial values
-        // --------------------------------------------------------
         clk        = 1'b0;
         rst_n      = 1'b0;
 
@@ -104,339 +454,183 @@ module tb_int8_matmul;
         matrix_sel = 1'b0;
         start      = 1'b0;
 
-        // --------------------------------------------------------
-        // Build deterministic signed matrices
-        //
-        // A[r][c] = r - c
-        // B[r][c] = r + c - 3
-        //
-        // These contain both positive and negative INT8 values.
-        // --------------------------------------------------------
-        for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
-            for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
-
-                a_values[r][c] = 8'(r - c);
-                b_values[r][c] = 8'(r + c - 3);
-
-            end
-        end
-
-        // --------------------------------------------------------
-        // Generate software reference:
-        //
-        // C[r][c] = sum(A[r][k] * B[k][c])
-        // --------------------------------------------------------
-        for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
-            for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
-
-                expected_value = 0;
-
-                for (k = 0; k < MATRIX_SIZE; k = k + 1) begin
-                    expected_value =
-                        expected_value
-                        + $signed(a_values[r][k])
-                        * $signed(b_values[k][c]);
-                end
-
-                idx = r * MATRIX_SIZE + c;
-                expected_flat[idx] = expected_value;
-
-            end
-        end
-
-        // --------------------------------------------------------
-        // Waveform tracing
-        // --------------------------------------------------------
-        $dumpfile("int8_matmul.fst");
-        $dumpvars(0, tb_int8_matmul);
-
-        // --------------------------------------------------------
-        // RESET
-        // --------------------------------------------------------
-        repeat (2) @(posedge clk);
-
-        #1;
-
-        check(busy == 1'b0,
-              "busy should be 0 after reset");
-
-        check(done == 1'b0,
-              "done should be 0 after reset");
-
-        check(out_valid == 1'b0,
-              "out_valid should be 0 after reset");
-
-        $display("PASS: reset");
-
-        // Release reset
-        @(negedge clk);
-        rst_n = 1'b1;
-
-        // --------------------------------------------------------
-        // LOAD MATRIX A
-        //
-        // Inputs are changed on negedge.
-        // DUT samples them on the following posedge.
-        // --------------------------------------------------------
-        @(negedge clk);
-
-        data_valid = 1'b1;
-        matrix_sel = 1'b0;
-
-        for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
-            for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
-
-                data_in = a_values[r][c];
-
-                @(posedge clk);
-                #1;
-
-                check(busy == 1'b1,
-                      "busy should be high during A loading");
-
-            end
-        end
-
-        $display("PASS: loaded matrix A");
-
-        // --------------------------------------------------------
-        // LOAD MATRIX B
-        //
-        // matrix_sel changes only after the final A clock edge,
-        // so the final A transfer is sampled with matrix_sel = 0.
-        // --------------------------------------------------------
-        @(negedge clk);
-
-        matrix_sel = 1'b1;
-
-        for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
-            for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
-
-                data_in = b_values[r][c];
-
-                @(posedge clk);
-                #1;
-
-                check(busy == 1'b1,
-                      "busy should be high during B loading");
-
-            end
-        end
-
-        $display("PASS: loaded matrix B");
-
-        // --------------------------------------------------------
-        // Finish loading and enter READY
-        // --------------------------------------------------------
-        @(negedge clk);
-
-        data_valid = 1'b0;
-        matrix_sel = 1'b0;
-        data_in    = '0;
-
-        @(posedge clk);
-        #1;
-
-        check(busy == 1'b1,
-              "busy should be high in READY");
-
-        check(dut.u_controller.state == 3'd3,
-              "controller should be in READY");
-
-        $display("PASS: entered READY");
-
-        // --------------------------------------------------------
-        // START COMPUTATION
-        //
-        // start is asserted on negedge and sampled on posedge.
-        // --------------------------------------------------------
-        @(negedge clk);
-        start = 1'b1;
-
-        // During READY + start, acc_clear should be asserted.
-        #1;
-
-        check(dut.u_controller.state == 3'd3,
-              "controller should still be in READY before start edge");
-
-        check(dut.u_controller.acc_clear == 1'b1,
-              "acc_clear should assert when start is accepted");
-
-        @(posedge clk);
-        #1;
-
-        check(dut.u_controller.state == 3'd4,
-              "controller should enter COMPUTE");
-
-        check(dut.u_controller.k_count == 3'd0,
-              "first compute cycle should use k=0");
-
-        check(dut.u_controller.mac_enable == 1'b1,
-              "mac_enable should assert during COMPUTE");
-
-        start = 1'b0;
-
-        $display("PASS: computation started");
-
-        // --------------------------------------------------------
-        // VERIFY 8 COMPUTE CYCLES
-        //
-        // k = 0,1,2,3,4,5,6,7
-        // --------------------------------------------------------
-        for (k = 0; k < 8; k = k + 1) begin
-
-            // Signals are stable after the previous rising edge.
-            #1;
-
-            $display(
-                "DEBUG: state=%0d k=%0d mac_enable=%0d done=%0d",
-                dut.u_controller.state,
-                dut.u_controller.k_count,
-                dut.u_controller.mac_enable,
-                done
-            );
-
-            check(dut.u_controller.state == 3'd4,
-                  "controller should be in COMPUTE");
-
-            check(dut.u_controller.k_count == 3'(k),
-                  "k_count mismatch during COMPUTE");
-
-            check(dut.u_controller.mac_enable == 1'b1,
-                  "mac_enable should be high during COMPUTE");
-
-            check(dut.u_controller.acc_clear == 1'b0,
-                  "acc_clear should be low during COMPUTE");
-
-            check(done == 1'b0,
-                  "done should remain low before final MAC");
-
-            @(posedge clk);
-            #1;
-
-        end
-
-        // --------------------------------------------------------
-        // FINAL MAC / DONE
-        // --------------------------------------------------------
-        check(dut.u_controller.state == 3'd5,
-              "controller should enter OUTPUT after final MAC");
-
-        check(done == 1'b1,
-              "done should pulse after final MAC");
-
-        check(dut.u_controller.mac_enable == 1'b0,
-              "mac_enable should be low after final MAC");
-
-        check(out_valid == 1'b0,
-              "out_valid should remain low during done");
-
-        $display("PASS: 8 compute cycles");
-        $display("PASS: computation complete");
-
-        // --------------------------------------------------------
-        // MOVE TO FIRST OUTPUT
-        // --------------------------------------------------------
-        @(posedge clk);
-        #1;
-
-        check(done == 1'b0,
-              "done should be a one-cycle pulse");
-
-        check(out_valid == 1'b1,
-              "out_valid should assert after done");
-
-        check(dut.u_controller.out_count == 6'd0,
-              "first output index should be 0");
-
-        $display("PASS: output started");
-
-        // --------------------------------------------------------
-        // CHECK ALL 64 OUTPUTS
-        //
-        // Output order is row-major:
-        //
-        // 0  -> C[0][0]
-        // 1  -> C[0][1]
-        // ...
-        // 7  -> C[0][7]
-        // 8  -> C[1][0]
-        // ...
-        // 63 -> C[7][7]
-        // --------------------------------------------------------
-        for (idx = 0; idx < 64; idx = idx + 1) begin
-
-            #1;
-
-            check(out_valid == 1'b1,
-                  "out_valid should remain high during output");
-
-            check(dut.u_controller.out_count == 6'(idx),
-                  "out_count mismatch during output");
-
-            actual_value = int'($signed(data_out));
-            expected_value = expected_flat[idx];
-
-            if (actual_value != expected_value) begin
-
-                $display(
-                    "ERROR: output[%0d] actual=%0d expected=%0d",
-                    idx,
-                    actual_value,
-                    expected_value
-                );
-
-                $fatal(1);
-            end
-
-            @(posedge clk);
-            #1;
-
-        end
-
-        // --------------------------------------------------------
-        // TRANSACTION COMPLETE
-        // --------------------------------------------------------
-        check(out_valid == 1'b0,
-              "out_valid should be low after final output");
-
-        check(busy == 1'b0,
-              "busy should be low after transaction");
-
-        check(done == 1'b0,
-              "done should be low after transaction");
-
-        $display("PASS: all 64 matrix results");
-
-        // --------------------------------------------------------
-        // Print software reference matrix
-        // --------------------------------------------------------
-        $display("");
-        $display("Reference matrix C:");
-
-        for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
-
-            $write("  ");
-
-            for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
-                $write(
-                    "%6d ",
-                    expected_flat[r * MATRIX_SIZE + c]
-                );
-            end
-
-            $display("");
-
-        end
+        // Initialize reproducible random sequence.
+        random_seed = RANDOM_SEED_INIT;
 
         $display("");
         $display("========================================");
-        $display(" PASS: int8_matmul integration test");
+        $display(" DAY-5 FUNCTIONAL VERIFICATION");
+        $display(" Random seed = 0x%08h", random_seed);
+        $display("========================================");
+
+        // --------------------------------------------------------
+        // Waveform
+        // --------------------------------------------------------
+        $dumpfile("int8_matmul_day5.fst");
+        $dumpvars(0, tb_int8_matmul);
+
+        // ========================================================
+        // DIRECTED TEST 1: All zeros
+        // ========================================================
+        for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
+            for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
+                a_values[r][c] = 8'sd0;
+                b_values[r][c] = 8'sd0;
+            end
+        end
+
+        run_matrix_test("all zeros");
+
+        // ========================================================
+        // DIRECTED TEST 2: All +1
+        //
+        // Expected result: every C element = 8
+        // ========================================================
+        for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
+            for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
+                a_values[r][c] = 8'sd1;
+                b_values[r][c] = 8'sd1;
+            end
+        end
+
+        run_matrix_test("all +1");
+
+        // ========================================================
+        // DIRECTED TEST 3: Positive × positive
+        //
+        // 3 × 2 × 8 = 48
+        // ========================================================
+        for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
+            for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
+                a_values[r][c] = 8'sd3;
+                b_values[r][c] = 8'sd2;
+            end
+        end
+
+        run_matrix_test("positive x positive");
+
+        // ========================================================
+        // DIRECTED TEST 4: Negative × positive
+        //
+        // (-3) × 2 × 8 = -48
+        // ========================================================
+        for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
+            for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
+                a_values[r][c] = -8'sd3;
+                b_values[r][c] = 8'sd2;
+            end
+        end
+
+        run_matrix_test("negative x positive");
+
+        // ========================================================
+        // DIRECTED TEST 5: Positive × negative
+        //
+        // 3 × (-2) × 8 = -48
+        // ========================================================
+        for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
+            for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
+                a_values[r][c] = 8'sd3;
+                b_values[r][c] = -8'sd2;
+            end
+        end
+
+        run_matrix_test("positive x negative");
+
+        // ========================================================
+        // DIRECTED TEST 6: Negative × negative
+        //
+        // (-3) × (-2) × 8 = 48
+        // ========================================================
+        for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
+            for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
+                a_values[r][c] = -8'sd3;
+                b_values[r][c] = -8'sd2;
+            end
+        end
+
+        run_matrix_test("negative x negative");
+
+        // ========================================================
+        // DIRECTED TEST 7: INT8 boundary values
+        //
+        // -128 × 127 × 8 = -130048
+        // ========================================================
+        for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
+            for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
+                a_values[r][c] = 8'sh80;   // -128
+                b_values[r][c] = 8'sd127;  // +127
+            end
+        end
+
+        run_matrix_test("INT8 boundary values");
+
+        // ========================================================
+        // DIRECTED TEST 8: Structured mixed-sign matrices
+        // ========================================================
+        for (r = 0; r < MATRIX_SIZE; r = r + 1) begin
+            for (c = 0; c < MATRIX_SIZE; c = c + 1) begin
+                a_values[r][c] = 8'(r - c);
+                b_values[r][c] = 8'(r + c - 3);
+            end
+        end
+
+        run_matrix_test("structured mixed-sign");
+
+        // ========================================================
+        // RANDOM TESTS
+        // ========================================================
+        $display("");
+        $display("========================================");
+        $display(" STARTING %0d RANDOM TESTS", NUM_RANDOM_TESTS);
+        $display("========================================");
+
+        for (
+            random_test_num = 1;
+            random_test_num <= NUM_RANDOM_TESTS;
+            random_test_num = random_test_num + 1
+        ) begin
+
+            generate_random_matrices;
+
+            $display("");
+            $display(
+                "RANDOM TEST %02d / %02d",
+                random_test_num,
+                NUM_RANDOM_TESTS
+            );
+
+            /*
+             * In the event of a failure, uncomment this line
+             * to print the matrices that caused the failure:
+             *
+             * print_test_matrices;
+             */
+
+            run_matrix_test(
+                $sformatf(
+                    "random %02d",
+                    random_test_num
+                )
+            );
+
+        end
+
+        // --------------------------------------------------------
+        // Final result
+        // --------------------------------------------------------
+        $display("");
+        $display("========================================");
+        $display(" ALL DAY-5 TESTS PASSED");
+        $display("========================================");
+        $display(" Directed tests : 8");
+        $display(" Random tests   : %0d", NUM_RANDOM_TESTS);
+        $display(" Total tests    : %0d", 8 + NUM_RANDOM_TESTS);
+        $display(" Random seed    : 0x%08h", RANDOM_SEED_INIT);
         $display("========================================");
         $display("");
 
         $finish;
-
     end
 
 endmodule
