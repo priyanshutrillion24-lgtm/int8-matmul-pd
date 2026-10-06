@@ -242,3 +242,7 @@ Date:
 - Record versions from the actual environment used for the project.
 - Keep this file unchanged for a baseline run.
 - If a tool is upgraded later, record the change as a new experiment or environment revision rather than silently replacing the baseline version.
+
+Day 6 timing-tool versions
+Yosys: 0.52
+OpenSTA: 2.0.17
