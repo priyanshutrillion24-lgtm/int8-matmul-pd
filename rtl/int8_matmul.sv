@@ -19,7 +19,7 @@ module int8_matmul #(
     output logic                         busy,
     output logic                         done,
 
-    output logic signed [ACC_WIDTH-1:0] data_out,
+    output logic signed [ACC_WIDTH-1:0]  data_out,
     output logic                         out_valid
 );
 
@@ -39,10 +39,9 @@ module int8_matmul #(
     // ------------------------------------------------------------
     // Matrix storage
     //
-    // A[row][column]
-    // B[row][column]
-    //
-    // Each element is signed INT8.
+    // These remain internal 2-D arrays.
+    // Yosys is rejecting the 2-D ARRAY PORT, not these internal
+    // storage declarations.
     // ------------------------------------------------------------
     logic signed [DATA_WIDTH-1:0]
         a_matrix [0:MATRIX_SIZE-1][0:MATRIX_SIZE-1];
@@ -51,12 +50,25 @@ module int8_matmul #(
         b_matrix [0:MATRIX_SIZE-1][0:MATRIX_SIZE-1];
 
     // ------------------------------------------------------------
-    // Accumulator array
-    //
-    // acc_matrix[i][j] = C[i][j]
+    // Accumulator storage
     // ------------------------------------------------------------
     logic signed [ACC_WIDTH-1:0]
         acc_matrix [0:MATRIX_SIZE-1][0:MATRIX_SIZE-1];
+
+    // ------------------------------------------------------------
+    // Flat buses used to connect to mac_array.
+    //
+    // This avoids unsupported/awkward unpacked array module ports
+    // in the classic Yosys SystemVerilog frontend.
+    // ------------------------------------------------------------
+    logic signed
+        [MATRIX_SIZE*MATRIX_SIZE*DATA_WIDTH-1:0] a_flat;
+
+    logic signed
+        [MATRIX_SIZE*MATRIX_SIZE*DATA_WIDTH-1:0] b_flat;
+
+    logic signed
+        [MATRIX_SIZE*MATRIX_SIZE*ACC_WIDTH-1:0] acc_flat;
 
     // ------------------------------------------------------------
     // Controller
@@ -89,10 +101,9 @@ module int8_matmul #(
     //
     // load_count[5:3] = row
     // load_count[2:0] = column
-    //
-    // A and B are loaded one element per accepted cycle.
     // ------------------------------------------------------------
     always_ff @(posedge clk) begin
+
         if (a_write_en) begin
             a_matrix[load_count[5:3]][load_count[2:0]]
                 <= $signed(data_in);
@@ -102,16 +113,46 @@ module int8_matmul #(
             b_matrix[load_count[5:3]][load_count[2:0]]
                 <= $signed(data_in);
         end
+
     end
 
     // ------------------------------------------------------------
+    // Flatten 2-D A/B storage into packed buses.
+    // ------------------------------------------------------------
+    genvar r;
+    genvar c;
+
+    generate
+        for (r = 0; r < MATRIX_SIZE; r = r + 1) begin : gen_flatten_row
+
+            for (c = 0; c < MATRIX_SIZE; c = c + 1) begin : gen_flatten_col
+
+                localparam int INDEX =
+                    r * MATRIX_SIZE + c;
+
+                assign a_flat[
+                    INDEX*DATA_WIDTH
+                    +: DATA_WIDTH
+                ] = a_matrix[r][c];
+
+                assign b_flat[
+                    INDEX*DATA_WIDTH
+                    +: DATA_WIDTH
+                ] = b_matrix[r][c];
+
+                assign acc_matrix[r][c] =
+                    acc_flat[
+                        INDEX*ACC_WIDTH
+                        +: ACC_WIDTH
+                    ];
+
+            end
+
+        end
+    endgenerate
+
+    // ------------------------------------------------------------
     // MAC array
-    //
-    // Each PE computes:
-    //
-    //     acc[i][j] += A[i][k] * B[k][j]
-    //
-    // for k = 0...7.
     // ------------------------------------------------------------
     mac_array #(
         .MATRIX_SIZE (MATRIX_SIZE),
@@ -119,36 +160,37 @@ module int8_matmul #(
         .ACC_WIDTH   (ACC_WIDTH)
     ) u_mac_array (
         .clk        (clk),
-        .a_matrix   (a_matrix),
-        .b_matrix   (b_matrix),
+        .a_flat     (a_flat),
+        .b_flat     (b_flat),
         .k_count    (k_count),
         .acc_clear  (acc_clear),
         .mac_enable (mac_enable),
-        .acc_matrix (acc_matrix)
+        .acc_flat   (acc_flat)
     );
 
     // ------------------------------------------------------------
     // Output serialization
     //
-    // out_count is row-major:
+    // Row-major:
     //
     // 0  -> C[0][0]
     // 1  -> C[0][1]
     // ...
-    // 7  -> C[0][7]
-    // 8  -> C[1][0]
-    // ...
     // 63 -> C[7][7]
-    //
-    // data_out is meaningful when out_valid = 1.
     // ------------------------------------------------------------
     always_comb begin
+
         data_out = '0;
 
         if (out_valid) begin
             data_out =
-                acc_matrix[out_count[5:3]][out_count[2:0]];
+                acc_matrix[
+                    out_count[5:3]
+                ][
+                    out_count[2:0]
+                ];
         end
+
     end
 
 endmodule
