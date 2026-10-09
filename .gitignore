@@ -14,3 +14,6 @@ obj_dir/
 *.swo
 *~
 .DS_Store
+
+# Generated Yosys JSON netlists are reproducible
+results/netlist/*.json
